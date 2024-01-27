@@ -196,13 +196,13 @@ void loop() {
   V_direction = in_V_direction * (PI / 180.0); // [rad]
   R = (in_R * 30) / (PI * 0.5); // [rpm]
 
-  // V_direction 入力は正面が0度になるから90度足す．
+  // V_direction 入力は正面が0度になるから90度足す必要がある.
   // 本来の座標系は，右が0度，反時計回りに増加する．
   Vx = V * cos(V_direction); 
   Vy = V * sin(V_direction); 
 
-  // 3つのタイヤの速度を計算
-  // 横軸が0度のとき，タイヤの角度は, 30, 150, 270度. 1,2,3
+  // 3つのタイヤの速度を計算（Vx, Vy, Rを考慮）
+  // 横軸が0度のとき，タイヤの角度はそれぞれ, 30度, 150度, 270度. 番号は1,2,3
   for (int i = 0; i < 3; i++){
     Vx_list[i] = Vx + 0.5 * cos((PI / 6.0) + wheel_spacing * i + PI / 2.0) * R;
     Vy_list[i] = Vy + 0.5 * sin((PI / 6.0) + wheel_spacing * i + PI / 2.0) * R;
@@ -233,11 +233,13 @@ void loop() {
 
   for (int i = 0; i < 3; i++){
     double angle_diff = target_angle[i] - current_angle[i];
+    // 0と360度の境目をまたぐときに正負が逆になるため，そうならないようにある程度の角度にきたときに補正．
     if (angle_diff < -270.0) {
       target_angle[i] += 360;
     } else if (angle_diff > 270.0) {
       target_angle[i] -= 360;
     }
+    // 目標角度に向かって回転する際に，時計回り，反時計回り，どちらが早いかを判定．
     if (target_angle[i] - current_angle[i] < -90) { // 180度以上の差がある場合
       target_angle[i] += 180;
       target_speed[i] = -target_speed[i];

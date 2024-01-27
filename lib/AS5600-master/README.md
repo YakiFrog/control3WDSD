@@ -436,7 +436,6 @@ TODO: measure performance impact.
 
 TODO: investigate impact on functionality of other registers.
 
-
 ## Analog OUT
 
 (details datasheet - page 25 = AS5600)
