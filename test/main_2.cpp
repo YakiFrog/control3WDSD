@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <WiFi.h>
+#include <WiFiUdp.h>
 #include <AsyncUDP.h>
 #include "m2006_twai.h"
 #include "as5600_tca9548a.h"
@@ -9,43 +10,24 @@
 #define MAX_AMPERE 3000
 #define MAX_ROTATE_RPM 150
 #define LED_BUILTIN GPIO_NUM_2
-#define CW  true
-#define CCW false
+#define CW                                  true
+#define CCW                                 false
 
-// I2C
 #define SDA_PIN GPIO_NUM_5
 #define SCL_PIN GPIO_NUM_6
 #define LED_PIN GPIO_NUM_1
 
 #define NUMPIXELS 27
+
 Adafruit_NeoPixel LEDArray(NUMPIXELS, LED_PIN, NEO_GRB + NEO_KHZ800);
 
 // WiFiを使う時はコメントアウト(ロボプロのルーター)
 #define WiFi_ON
 
 // 僕の家のWiFi
-// #define ANNEX_WiFi_MODE
-
-// BobのWiFi
-#define BOB_WiFi_MODE
-
-#ifdef ANNEX_WiFi_MODE
-const char* ssid = "Buffalo-G-8360";
-const char* password = "tn3krc7dabknc";
-IPAddress ipAddress(192, 168, 11, 2); // Server側(Python)のIPアドレス
-uint16_t port = 8000; // ポート番号
-#endif
-
-#ifdef BOB_WiFi_MODE
+// #define HOUSE_WiFi_MODE
 const char* ssid = "alvin";
 const char* password = "bobalvin";
-uint16_t port = 12345; // ポート番号
-#else
-const char* ssid = "Buffalo-G-2EC8";
-const char* password = "exkfnthn7x7k5";
-IPAddress ipAddress(192, 168, 11, 60); // Server側のIPアドレス
-uint16_t port = 8000; // ポート番号
-#endif
 
 CANWrapper canWrapper;
 
@@ -65,6 +47,7 @@ float target_angle[3] = {0, 0, 0}; // 目標角度
 float past_target_angle[3] = {0, 0, 0};
 float rotate_rpm[3] = {0, 0, 0};
 float target_rpm[6] = {0, 0, 0, 0, 0, 0}; // 目標回転数（出力）
+float i = 0.0;
 
 // PIDの計算用
 float prev_time = 0.0;
@@ -84,7 +67,7 @@ float integral_angle[3];
 float derivative_angle[3];
 float pre_error_angle[3];
 
-float Kp_angle = 10; 
+float Kp_angle = 1; 
 float Ki_angle = 0; 
 float Kd_angle = 0;
 
@@ -109,9 +92,9 @@ void Core0b(void *args);
 void Core1b(void *args);
 
 // 入力
-float in_V = 0.0; // [m/s] -2.0 ~ 2.0
-float in_V_direction = 0.0; // [degrees] 0 ~ 360
-float in_R = 0.0; // [m/s] -2.0 ~ 2.0
+float in_V = 0.0;
+float in_V_direction = 0.0;
+float in_R = 0.0;
 
 float V = 0.0; // 移動速度[rpm]
 float V_direction = 0.0; // 移動方向[rad]
@@ -121,22 +104,21 @@ float Vx, Vy = 0.0;
 float Vx_list[3] = {0.0, 0.0, 0.0};
 float Vy_list[3] = {0.0, 0.0, 0.0};
 float wheel_spacing = 2 * PI / 3;
-
-void lit_up_wheel(uint8_t R, uint8_t G, uint8_t B, bool Dir, uint16_t interval){
+void litUpWheel(uint8_t R, uint8_t G, uint8_t B, bool Dir, uint16_t interval){
   LEDArray.clear();
   if(Dir){
-    for(int i=0; i<=NUMPIXELS; i++){
-      for(int j=0; j<=i; j++){
-      LEDArray.setPixelColor(j, LEDArray.Color(R,G,B));
+    for(int i=0;i<=NUMPIXELS;i++){
+      for(int j=0;j<=i;j++){
+      LEDArray.setPixelColor(j,LEDArray.Color(R,G,B));
       LEDArray.show();
       }
       delay(interval/NUMPIXELS);
     }
   }
   else {
-    for(int i=NUMPIXELS; i>=0; i--){
-      for(int j=NUMPIXELS; j>=i; j--){
-      LEDArray.setPixelColor(j, LEDArray.Color(R,G,B));
+    for(int i=NUMPIXELS;i>=0;i--){
+      for(int j=NUMPIXELS;j>=i;j--){
+      LEDArray.setPixelColor(j,LEDArray.Color(R,G,B));
       LEDArray.show();
       }
       delay(interval/NUMPIXELS);
@@ -144,7 +126,7 @@ void lit_up_wheel(uint8_t R, uint8_t G, uint8_t B, bool Dir, uint16_t interval){
   }
 }
 
-void lit_up_all_led(uint8_t R, uint8_t G, uint8_t B){
+void litUpAllLED(uint8_t R, uint8_t G, uint8_t B){
   LEDArray.clear();
   for(int i=0;i<NUMPIXELS;i++){
       LEDArray.setPixelColor(i,LEDArray.Color(R,G,B));
@@ -182,27 +164,71 @@ void setup() {
 
   #ifdef WiFi_ON
   // WiFI
-  lit_up_wheel(255, 0, 0, CCW, 2000);
+  litUpWheel(255, 0, 0, CCW, 2000);
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
   while (WiFi.waitForConnectResult() != WL_CONNECTED) {
-    Serial.println("WiFi Failed");
-    lit_up_wheel(255, 0, 0, CW, 500);
+    Serial.print(".");
+    litUpWheel(255, 0, 0, CW, 500);
   }
   Serial.println("WiFi Ready");
-  Serial.print("IP address: " + WiFi.localIP().toString()); 
-  lit_up_all_led(0, 255, 0);
-  
-  if (udp.listen(port)) {
+  Serial.print("ESP32 IP Address: ");
+  Serial.println(WiFi.localIP());
+  litUpAllLED(0, 255, 0);
+
+      // Receive
+    // udp.onPacket([](AsyncUDPPacket packet) { // packetは，受け取ったデータ
+    //   // packet.data()をスペース区切りで分割
+    //   // [V]_[V_direction]_[R]
+
+    //   String str = String((char*)packet.data());
+    //   in_V = str.substring(0, str.indexOf(" ")).toFloat();
+
+    //   str = str.substring(str.indexOf(" ") + 1);
+    //   in_V_direction = str.substring(0, str.indexOf(" ")).toFloat();
+
+    //   str = str.substring(str.indexOf(" ") + 1);
+    //   in_R = str.substring(0, str.indexOf(" ")).toFloat();
+    // });
+
+    if (udp.listen(12345)) {
     udp.onPacket([](AsyncUDPPacket packet) {
-      String str = String((char*)packet.data());
-      in_V = str.substring(0, str.indexOf(" ")).toFloat();
-      str = str.substring(str.indexOf(" ") + 1);
-      in_V_direction = str.substring(0, str.indexOf(" ")).toFloat();
-      str = str.substring(str.indexOf(" ") + 1);
-      in_R = str.substring(0, str.indexOf(" ")).toFloat();
+      // Print the received packet data as a string
+      Serial.print("Packet received from ");
+      Serial.print(packet.remoteIP());
+      Serial.print(": ");
+      
+      // Ensure packet data is null-terminated
+      char* data = (char*)malloc(packet.length() + 1);
+      memcpy(data, packet.data(), packet.length());
+      data[packet.length()] = '\0';
+
+      // Print the data
+      Serial.println(data);
+
+      // Example of parsing the data
+      // If data is comma-separated like "x_val,y_val,degree"
+      String dataStr(data);
+      int firstComma = dataStr.indexOf(',');
+      int secondComma = dataStr.indexOf(',', firstComma + 1);
+
+      String xValStr = dataStr.substring(0, firstComma);
+      String yValStr = dataStr.substring(firstComma + 1, secondComma);
+      String degreeStr = dataStr.substring(secondComma + 1);
+
+      // Convert the string values to float
+      in_V = xValStr.toFloat();
+      in_V_direction = yValStr.toFloat()*180/PI;
+      in_R = degreeStr.toFloat();
+
+      Serial.print("V Value: "); Serial.println(in_V);
+      Serial.print("R Value: "); Serial.println(in_R);
+      Serial.print("Dir Value: "); Serial.println(in_V_direction);
+
+      free(data);
     });
   }
+  
   #endif
 
   // AS5600_TCA9548A
@@ -223,21 +249,18 @@ void setup() {
 }
 
 void loop() {
-  V = (in_V * 30) / (PI * 0.035); // [m/s] to [rpm]
-  V_direction = in_V_direction * (PI / 180.0); // [degree] to [rad]
-  R = (in_R * 30) / (PI * 0.035); // [m/s] to [rpm]
+  
+  V = (in_V * 30) / (PI * 0.035); // [rpm]
+  V_direction = in_V_direction * (PI / 180.0); // [rad]
+  R = (in_R * 30) / (PI * 0.5); // [rpm]
 
-  if (V == 0) {
-    V = 0.01; // 0除算防止
-  }
-
-  // V_direction 入力は正面が0度になるから90度足す必要がある.
+  // V_direction 入力は正面が0度になるから90度足す．
   // 本来の座標系は，右が0度，反時計回りに増加する．
-  Vx = V * cos(V_direction - PI / 2.0); 
-  Vy = V * sin(V_direction - PI / 2.0); 
+  Vx = V * cos(V_direction); 
+  Vy = V * sin(V_direction); 
 
-  // 3つのタイヤの速度を計算（Vx, Vy, Rを考慮）
-  // 横軸が0度のとき，タイヤの角度はそれぞれ, 30度, 150度, 270度. 番号は1,2,3
+  // 3つのタイヤの速度を計算
+  // 横軸が0度のとき，タイヤの角度は, 30, 150, 270度. 1,2,3
   for (int i = 0; i < 3; i++){
     Vx_list[i] = Vx + 0.5 * cos((PI / 6.0) + wheel_spacing * i + PI / 2.0) * R;
     Vy_list[i] = Vy + 0.5 * sin((PI / 6.0) + wheel_spacing * i + PI / 2.0) * R;
@@ -261,7 +284,6 @@ void loop() {
     d_a[i] += (float)(w_a[i] * dt / 1000.0) / 1.3;
     if (d_a[i] > 360) d_a[i] -= 360;
     else if (d_a[i] < 0) d_a[i] += 360;
-    // current_angle[i] = d_a[i];
     current_angle[i] = as5600_angle[i];
   }
 
@@ -269,13 +291,11 @@ void loop() {
 
   for (int i = 0; i < 3; i++){
     double angle_diff = target_angle[i] - current_angle[i];
-    // 0と360度の境目をまたぐときに正負が逆になるため，そうならないようにある程度の角度にきたときに補正．
     if (angle_diff < -270.0) {
       target_angle[i] += 360;
     } else if (angle_diff > 270.0) {
       target_angle[i] -= 360;
     }
-    // 目標角度に向かって回転する際に，時計回り，反時計回り，どちらが早いかを判定．
     if (target_angle[i] - current_angle[i] < -90) { // 180度以上の差がある場合
       target_angle[i] += 180;
       target_speed[i] = -target_speed[i];
@@ -328,25 +348,24 @@ void loop() {
   canWrapper.sendMessage(0x200, send_current_data1);
   canWrapper.sendMessage(0x1FF, send_current_data2);
 
+
   delay(10);
 }
 
 void Core1b(void *args) {
-  while (1){
-    // Serial 入力
-    if (Serial.available() > 0) {
-      // スペース区切りで分割
-      in_V = Serial.parseFloat(); // 移動速度[m/s]
-      in_V = constrain(in_V, -1, 1);
-
-      in_V_direction = Serial.parseFloat(); // 移動方向[degrees]
-      in_V_direction = constrain(in_V_direction, 0, 360);
-
-      in_R = Serial.parseFloat(); // 回転速度[m/s]
-      in_R = constrain(in_R, -1, 1);
-    }
-    delay(10);
-    }
+   while (1){
+  //   // Serial 入力
+  //   if (Serial.available() > 0) {
+  //     // スペース区切りで分割
+  //     in_V = Serial.parseFloat(); // 移動速度[m/s]
+  //     in_V = constrain(in_V, -1, 1);
+  //     in_V_direction = Serial.parseFloat(); // 移動方向[degrees]
+  //     in_V_direction = constrain(in_V_direction, 0, 360);
+  //     in_R = Serial.parseFloat(); // 回転速度[m/s]
+  //     in_R = constrain(in_R, -1, 1);
+  //   }
+     delay(10);
+     }
 }
 
 void Core0a(void *args) {
@@ -362,28 +381,28 @@ void Core0b(void *args) {
   while (1) {
     // for teleplot
     for (int i = 0; i < 3; i++){
-      String str = ">target_speed" + String(i) + ": " + String(target_speed[i]) + "\n";
-      Serial.println(str);
-      str = ">target_angle" + String(i) + ": " + String(target_angle[i]) + "\n";
-      Serial.println(str);
-      str = ">current_angle" + String(i) + ": " + String(current_angle[i]) + "\n";
-      Serial.println(str);
-      str = ">d_a" + String(i) + ": " + String(d_a[i]) + "\n";
-      Serial.println(str);
-      str = ">as5600_angle" + String(i) + ": " + String(as5600_angle[i]) + "\n";
-      Serial.println(str);
-    }
+    //   String str = ">target_speed" + String(i) + ": " + String(target_speed[i]) + "\n";
+    //   Serial.println(str);
+    //   str = ">target_angle" + String(i) + ": " + String(target_angle[i]) + "\n";
+    //   Serial.println(str);
+      // str = ">current_angle" + String(i) + ": " + String(current_angle[i]) + "\n";
+      // Serial.println(str);
+    //   str = ">d_a" + String(i) + ": " + String(d_a[i]) + "\n";
+    //   Serial.println(str);
+    //   String str = ">as5600_angle" + String(i) + ": " + String(as5600_angle[i]) + "\n";
+    // Serial.println(str);
+     }
 
-    for (int i = 0; i < 6; i++){
-      String str = ">target_rpm" + String(i) + ": " + String(target_rpm[i]) + "\n";
-      Serial.println(str);
-      str = ">raw_current_data" + String(i) + ": " + String(raw_current_data[i]) + "\n";
-      Serial.println(str);
-      str = ">m_rpm" + String(i) + ": " + String(m_rpm[i]) + "\n";
-      Serial.println(str);
-      str = ">m_torque" + String(i) + ": " + String(m_torque[i]) + "\n";
-      Serial.println(str);
-    }
+    // for (int i = 0; i < 6; i++){
+    //   String str = ">target_rpm" + String(i) + ": " + String(target_rpm[i]) + "\n";
+    //   Serial.println(str);
+    //   str = ">raw_current_data" + String(i) + ": " + String(raw_current_data[i]) + "\n";
+    //   Serial.println(str);
+    //   str = ">m_rpm" + String(i) + ": " + String(m_rpm[i]) + "\n";
+    //   Serial.println(str);
+    //   str = ">m_torque" + String(i) + ": " + String(m_torque[i]) + "\n";
+    //   Serial.println(str);
+    // }
     delay(100);
   }
 }
