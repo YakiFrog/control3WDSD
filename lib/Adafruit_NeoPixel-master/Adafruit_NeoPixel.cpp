@@ -3393,8 +3393,7 @@ uint8_t Adafruit_NeoPixel::getBrightness(void) const { return brightness - 1; }
 /*!
   @brief   Fill the whole NeoPixel strip with 0 / black / off.
 */
-void Adafruit_NeoPixel::clear(void) { memset(pixels, 0, numBytes); }
-
+void Adafruit_NeoPixel::clear(void) { memset(pixels, 0, numBytes); } 
 // A 32-bit variant of gamma8() that applies the same function
 // to all components of a packed RGB or WRGB value.
 uint32_t Adafruit_NeoPixel::gamma32(uint32_t x) {

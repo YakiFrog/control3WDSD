@@ -13,7 +13,8 @@
 
 #define DEFAULT_INTERVAL 0
 
-
+// 受信したデータを格納する変数
+// 場所がわかりにくくてごめんね．ポインタ使えばもっと綺麗に書けるかもね
 int16_t m_degree[8] = {0, 0, 0, 0, 0, 0, 0, 0};
 int16_t m_rpm[8]    = {0, 0, 0, 0, 0, 0, 0, 0};
 int16_t m_torque[8] = {0, 0, 0, 0, 0, 0, 0, 0};
@@ -43,6 +44,12 @@ public:
     driver_installed = true;
     return true;
   }
+  bool waitForConnection() {
+    while (!driver_installed) {
+      delay(DEFAULT_INTERVAL);
+    }
+    return true;
+  }
 
   void update() {
     if (!driver_installed) {
@@ -50,9 +57,8 @@ public:
       return;
     }
 
-    processAlerts();
+    processAlerts(); 
     printStatusInfo();
-
   }
 
   void sendMessage(uint32_t identifier, int8_t data[], uint8_t data_length = TWAI_FRAME_MAX_DLC) {
