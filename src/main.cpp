@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <AsyncUDP.h>
+#include <WiFiUdp.h>
 #include "m2006_twai.h"
 #include "as5600_tca9548a.h"
 #include "led_controller.h"
@@ -18,24 +19,41 @@
 #define SDA_PIN GPIO_NUM_5
 #define SCL_PIN GPIO_NUM_6
 
+// WiFi
 #define WiFi_ON
-#define HOME_WiFi
-// #define ANNEX_WiFi
+// #define HOME_WiFi
+#define ANNEX_WiFi
+
+// DEBUG
+// #define DEBUG
 
 #ifdef ANNEX_WiFi
 const char* ssid = "Buffalo-G-8360";
 const char* password = "tn3krc7dabknc";
+IPAddress server_ip(192, 168, 11, 2);
+uint16_t server_port = 8080;
 uint16_t local_port = 12345;
 #endif
 
 #ifdef HOME_WiFi
 const char* ssid = "Buffalo-G-2EC8";
 const char* password = "exkfnthn7x7k5";
+IPAddress server_ip(192, 168, 11, 60);
+uint16_t server_port = 8080;
 uint16_t local_port = 12345;
 #endif
 
+// 受信したいデータ例
+// [Type 0] V, V_dir, V_yaw, 
+// [Type 1] LED_R, LED_G, LED_B, 光るパターン, 光る時間
+// [Type 2] Kp1, Ki1, Kd1, Kp2, Ki2, Kd2
+
 // UDP
-float recv_data[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+float recv_data[8] = {0, 0, 0, 0, 0, 0, 0, 0}; // [Type 1: V, V_dir, V_yaw]
+float data[8] = {0, 0, 0, 0, 0, 0, 0, 0}; // recv_dataのコピー
+
+// UDP受信時間
+unsigned long recv_time = 0;
 
 // AS5600
 float init_offset[3] = {0, 0, 0};
@@ -43,79 +61,10 @@ float live_offset[3] = {0, 0, 0};
 float as5600_angle[3] = {0, 0, 0};
 
 TaskHandle_t thp[3]; // 3つのタスクを作成
-AsyncUDP udp; // UDP object
+// AsyncUDP udp; // UDP object
+WiFiUDP udp; // WiFiUDP object
 CANWrapper can_wrapper;
 LEDController led(LED_PIN, NUMPIXELS);
-
-float Kp1 = 10;
-float Ki1 = 0;
-float Kd1 = 0;
-
-float Kp2 = Kp1 * 3;
-float Ki2 = Ki1 * 3;
-float Kd2 = Kd1 * 3;
-
-PIDController pid1(Kp1, Ki1, Kd1); // PID object
-PIDController pid2(Kp2, Ki2, Kd2); // PID object
-
-int16_t calc_current_data[8] = {0, 0, 0, 0, 0, 0, 0, 0};  // ID: 1-8
-int8_t send_current_data1[8] = {0, 0, 0, 0, 0, 0, 0, 0}; // ID: 1-8
-int8_t send_current_data2[8] = {0, 0, 0, 0, 0, 0, 0, 0}; // ID: 1-8
-
-void recv_cb(AsyncUDPPacket packet);
-void task1(void *args);
-void task2(void *args);
-void make_current_data(int16_t current_data_in[8], int8_t current_data_out1[8], int8_t current_data_out2[8]);
-
-void setup() {
-    Serial.begin(115200);
-    delay(5000);
-    Serial.println("Start");
-    pinMode(LED_BUILTIN, OUTPUT);
-    digitalWrite(LED_BUILTIN, HIGH);
-    pinMode(SDA_PIN, INPUT_PULLUP);
-    pinMode(SCL_PIN, INPUT_PULLUP);
-    // led
-    led.init();
-
-    #ifdef WiFi_ON
-    // WiFi
-    WiFi.mode(WIFI_STA);
-    WiFi.setTxPower(WIFI_POWER_13dBm);
-    WiFi.begin(ssid, password);
-    while (WiFi.status() != WL_CONNECTED) {
-        Serial.println("Connecting to WiFi...");
-        led.set_led_cw_ccw(255, 0, 0, true, 1000);
-    }
-    Serial.println("Connected to WiFi");
-    Serial.println("IP address: " + WiFi.localIP().toString());
-    led.set_all_led(0, 255, 0);
-
-    // UDP
-    if (udp.listen(local_port)) {
-        udp.onPacket(recv_cb);
-    }
-    #endif
-
-    // CAN
-    while (!can_wrapper.begin()) {
-        Serial.println("Failed to start CAN");
-        led.set_led_cw_ccw(255, 0, 0, true, 1000);
-    }
-    Serial.println("CAN started");
-    led.set_all_led(0, 0, 255);
-
-    // AS5600
-    as5600_tca9548a_init();
-    as5600_tca9548a_get_offset(init_offset);
-    init_offset[0] = 12.22;
-    init_offset[1] = 26.89;
-    init_offset[2] = 109.42;
-
-    // Task
-    xTaskCreatePinnedToCore(task1, "task1", 4096, NULL, 1, &thp[0], 1);
-    xTaskCreatePinnedToCore(task2, "task2", 4096, NULL, 1, &thp[1], 1);
-}
 
 // 時間変数
 float dt = 0;
@@ -141,6 +90,17 @@ float Vy = 0.0; // [rpm]
 float Vx_list[3] = {0.0, 0.0, 0.0}; // [rpm]
 float Vy_list[3] = {0.0, 0.0, 0.0}; // [rpm]
 
+float Kp1 = 10;
+float Ki1 = 0;
+float Kd1 = 0;
+
+float Kp2 = Kp1 * 3;
+float Ki2 = Ki1 * 3;
+float Kd2 = Kd1 * 3;
+
+PIDController pid1(Kp1, Ki1, Kd1); // PID object
+PIDController pid2(Kp2, Ki2, Kd2); // PID object
+
 // 目標値
 float target_speed[3] = {0.0, 0.0, 0.0}; // [rpm]
 float target_angle[3] = {0.0, 0.0, 0.0}; // [degree]
@@ -148,10 +108,84 @@ float target_angle[3] = {0.0, 0.0, 0.0}; // [degree]
 float rotate_speed[3] = {0.0, 0.0, 0.0}; // [rpm]
 float target_rpm[3] = {0.0, 0.0, 0.0}; // [rpm]
 
+int16_t calc_current_data[8] = {0, 0, 0, 0, 0, 0, 0, 0};  // ID: 1-8
+int8_t send_current_data1[8] = {0, 0, 0, 0, 0, 0, 0, 0}; // ID: 1-8
+int8_t send_current_data2[8] = {0, 0, 0, 0, 0, 0, 0, 0}; // ID: 1-8
+
+void recv_cb(AsyncUDPPacket packet);
+void recv_msg();
+void task1(void *args);
+void task2(void *args);
+void task3(void *args);
+void make_current_data(int16_t current_data_in[8], int8_t current_data_out1[8], int8_t current_data_out2[8]);
+
+void setup() {
+    Serial.begin(115200);
+    delay(5000);
+    Serial.println("Start");
+    pinMode(LED_BUILTIN, OUTPUT);
+    digitalWrite(LED_BUILTIN, HIGH);
+    pinMode(SDA_PIN, INPUT_PULLUP);
+    pinMode(SCL_PIN, INPUT_PULLUP);
+    // led
+    led.init();
+
+    #ifdef WiFi_ON
+    // WiFi
+    WiFi.mode(WIFI_STA);
+    WiFi.setTxPower(WIFI_POWER_13dBm);
+    WiFi.begin(ssid, password);
+    while (WiFi.status() != WL_CONNECTED) {
+        Serial.println("Connecting to WiFi...");
+        led.set_led_cw_ccw(255, 0, 0, true, 900);
+    }
+    Serial.println("Connected to WiFi");
+    Serial.println("IP address: " + WiFi.localIP().toString());
+    led.set_all_led(0, 255, 0);
+
+    // AsyncUDP Server
+    // if (udp.listen(local_port)) {
+    //     udp.onPacket(recv_cb);
+    // }
+
+    // WiFiUDP server
+    udp.begin(local_port);
+
+    #endif
+
+    // CAN
+    while (!can_wrapper.begin()) {
+        Serial.println("Failed to start CAN");
+        led.set_led_cw_ccw(255, 0, 255, true, 900);
+    }
+    Serial.println("CAN started");
+    led.set_all_led(0, 0, 255);
+
+    // AS5600
+    as5600_tca9548a_init();
+    as5600_tca9548a_get_offset(init_offset);
+    init_offset[0] = 12.22;
+    init_offset[1] = 26.89;
+    init_offset[2] = 109.42;
+
+    // Task
+    xTaskCreatePinnedToCore(task1, "task1", 4096, NULL, 1, &thp[0], 1); // CAN, AS5600
+    xTaskCreatePinnedToCore(task2, "task2", 4096, NULL, 1, &thp[1], 1); // Serial
+    xTaskCreatePinnedToCore(task3, "task3", 4096, NULL, 1, &thp[2], 1); // LED
+}
+
 void loop() {
-    V = (recv_data[0] * 30) / (PI * wheel_radius); // [rpm]
-    V_dir = recv_data[1] * (PI / 180); // [rad]
-    V_yaw = (recv_data[2] * 30) / (PI * wheel_radius); // [rpm]
+    recv_msg();
+    // 1秒以上受信データがない場合は，データを初期化
+    if (millis() - recv_time > 1000) {
+        data[0] = 0.01; // 0だと角度保持できないので，0.00001にする
+        data[1] = 0;
+        data[2] = 0;
+    }
+
+    V = (data[0] * 30) / (PI * wheel_radius); // [rpm]
+    V_dir = data[1] * (PI / 180); // [rad]
+    V_yaw = (data[2] * 30) / (PI * wheel_radius); // [rpm]
 
     // 車体速度
     Vx = V * cos(V_dir - PI / 2); // [rpm]
@@ -196,7 +230,6 @@ void loop() {
         rotate_speed[i] = (float)pid1.calculate(target_angle[i], as5600_angle[i], dt);
         rotate_speed[i] = constrain(rotate_speed[i], -MAX_YAW_RPM, MAX_YAW_RPM);
     }
-    Serial.println(String(pid1.calculate(target_angle[0], as5600_angle[0], dt)));
 
     // 目標回転数を計算
     for (int i = 0; i < 3; i++) {
@@ -219,7 +252,6 @@ void loop() {
     can_wrapper.sendMessage(0x200, send_current_data1);
     can_wrapper.sendMessage(0x1FF, send_current_data2);
     /* ----------------- */
-
     delay(10); // 1/5 時定数
 }
 
@@ -236,13 +268,52 @@ void make_current_data(int16_t current_data_in[8], int8_t current_data_out1[8], 
     }
 }
 
-
 void recv_cb(AsyncUDPPacket packet) {
+    recv_time = millis();
     String str = String((char*)packet.data());
     // スペース区切りで受信データを分割
     for (int i = 0; i < 3; i++) { // 受信データの数だけ繰り返す
         recv_data[i] = str.substring(0, str.indexOf(" ")).toFloat();
         str = str.substring(str.indexOf(" ") + 1);
+    }
+    // 受信データをコピー
+    if (recv_data[0] == 0) {
+        data[0] = 0.01;
+    } else {
+        data[0] = recv_data[0];
+        data[1] = recv_data[1];
+    }
+    data[2] = recv_data[2];
+
+    // クライアントにデータを返信
+    String send_data = "";
+    for (int i = 0; i < 6; i++) {
+        send_data += String(m_rpm[i]) + " ";
+    }
+    packet.printf(send_data.c_str());
+}
+
+void recv_msg() {
+    int packet_size = udp.parsePacket();
+    if (packet_size > 0) {
+        recv_time = millis();
+        String str = "";
+        for (int i = 0; i < packet_size; i++) {
+            str += (char)udp.read();
+        }
+        // スペース区切りで受信データを分割
+        for (int i = 0; i < 3; i++) { // 受信データの数だけ繰り返す
+            recv_data[i] = str.substring(0, str.indexOf(" ")).toFloat();
+            str = str.substring(str.indexOf(" ") + 1);
+        }
+        // 受信データをコピー
+        if (recv_data[0] == 0) {
+            data[0] = 0.00001;
+        } else {
+            data[0] = recv_data[0];
+            data[1] = recv_data[1];
+        }
+        data[2] = recv_data[2];
     }
 }
 
@@ -254,8 +325,10 @@ void task1(void *args) {
     }
 }
 
+// シリアル通信，UDP通信
 void task2(void *args) {
     while (1) {
+        #ifdef DEBUG
         Serial.println(">target_rpm[0]: " + String(target_rpm[0]));
         Serial.println(">m_rpm[0]: " + String(m_rpm[0]));
         Serial.println(">calc_current_data[0]: " + String(calc_current_data[0]));
@@ -268,6 +341,28 @@ void task2(void *args) {
         Serial.println(">recv_data[0]: " + String(recv_data[0]));
         Serial.println(">recv_data[1]: " + String(recv_data[1]));
         Serial.println(">recv_data[2]: " + String(recv_data[2]));
+        #else
+        udp.beginPacket(server_ip, server_port);
+        String send_data = "";
+        for (int i = 0; i < 6; i++) {
+            send_data += String(m_rpm[i]) + " ";
+        }
+        udp.print(send_data);
+        udp.endPacket();
+        #endif
         delay(100);
+    }
+}
+
+// LED制御 
+void task3(void *args) {
+    while (1) {
+        if (data[2] > 0.15) {
+            led.set_led_cw_ccw(0, 255, 255, true, 900);
+        } else if (data[2] < -0.15) {
+            led.set_led_cw_ccw(0, 255, 255, false, 900);
+        } else {
+            led.set_all_led(0, 255, 255);
+        }
     }
 }
