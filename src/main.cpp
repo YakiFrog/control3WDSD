@@ -1,6 +1,5 @@
 #include <Arduino.h>
 #include <WiFi.h>
-#include <AsyncUDP.h>
 #include <WiFiUdp.h>
 #include "m2006_twai.h"
 #include "as5600_tca9548a.h"
@@ -21,8 +20,8 @@
 
 // WiFi
 #define WiFi_ON
-// #define HOME_WiFi
-#define ANNEX_WiFi
+#define HOME_WiFi
+// #define ANNEX_WiFi
 
 // DEBUG
 // #define DEBUG
@@ -30,8 +29,8 @@
 #ifdef ANNEX_WiFi
 const char* ssid = "Buffalo-G-8360";
 const char* password = "tn3krc7dabknc";
-IPAddress server_ip(192, 168, 11, 2);
-uint16_t server_port = 8080;
+IPAddress server_ip(192, 168, 11, 60);
+uint16_t server_port = 1113;
 uint16_t local_port = 12345;
 #endif
 
@@ -39,7 +38,7 @@ uint16_t local_port = 12345;
 const char* ssid = "Buffalo-G-2EC8";
 const char* password = "exkfnthn7x7k5";
 IPAddress server_ip(192, 168, 11, 60);
-uint16_t server_port = 8080;
+uint16_t server_port = 1113;
 uint16_t local_port = 12345;
 #endif
 
@@ -61,7 +60,6 @@ float live_offset[3] = {0, 0, 0};
 float as5600_angle[3] = {0, 0, 0};
 
 TaskHandle_t thp[3]; // 3つのタスクを作成
-// AsyncUDP udp; // UDP object
 WiFiUDP udp; // WiFiUDP object
 CANWrapper can_wrapper;
 LEDController led(LED_PIN, NUMPIXELS);
@@ -90,8 +88,9 @@ float Vy = 0.0; // [rpm]
 float Vx_list[3] = {0.0, 0.0, 0.0}; // [rpm]
 float Vy_list[3] = {0.0, 0.0, 0.0}; // [rpm]
 
-float Kp1 = 10;
-float Ki1 = 0;
+// 誤差<10%程度
+float Kp1 = 12;
+float Ki1 = 0; // 0.1:BEST
 float Kd1 = 0;
 
 float Kp2 = Kp1 * 3;
@@ -106,13 +105,16 @@ float target_speed[3] = {0.0, 0.0, 0.0}; // [rpm]
 float target_angle[3] = {0.0, 0.0, 0.0}; // [degree]
 
 float rotate_speed[3] = {0.0, 0.0, 0.0}; // [rpm]
-float target_rpm[3] = {0.0, 0.0, 0.0}; // [rpm]
+float target_rpm[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0}; // [rpm]
+float prev_target_rpm[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0}; // [rpm]
+
+int K = 1.0; // ゲイン
+int T = 0.1; // 時定数(0より大きいほど遅れる)
 
 int16_t calc_current_data[8] = {0, 0, 0, 0, 0, 0, 0, 0};  // ID: 1-8
 int8_t send_current_data1[8] = {0, 0, 0, 0, 0, 0, 0, 0}; // ID: 1-8
 int8_t send_current_data2[8] = {0, 0, 0, 0, 0, 0, 0, 0}; // ID: 1-8
 
-void recv_cb(AsyncUDPPacket packet);
 void recv_msg();
 void task1(void *args);
 void task2(void *args);
@@ -143,11 +145,6 @@ void setup() {
     Serial.println("IP address: " + WiFi.localIP().toString());
     led.set_all_led(0, 255, 0);
 
-    // AsyncUDP Server
-    // if (udp.listen(local_port)) {
-    //     udp.onPacket(recv_cb);
-    // }
-
     // WiFiUDP server
     udp.begin(local_port);
 
@@ -164,9 +161,10 @@ void setup() {
     // AS5600
     as5600_tca9548a_init();
     as5600_tca9548a_get_offset(init_offset);
+    Serial.println(String(init_offset[0]) + " " + String(init_offset[1]) + " " + String(init_offset[2]));
     init_offset[0] = 12.22;
     init_offset[1] = 26.89;
-    init_offset[2] = 109.42;
+    init_offset[2] = 113.91;
 
     // Task
     xTaskCreatePinnedToCore(task1, "task1", 4096, NULL, 1, &thp[0], 1); // CAN, AS5600
@@ -221,6 +219,16 @@ void loop() {
         }
     }
 
+    // もし，目標角度と現在角度の差が45度以上なら，すべての車輪の速度を0にする
+    // TODO: スピードを出している時に，角度が大きく変わると0になるので，ぎくしゃくする．あんまり良くない
+    for (int i = 0; i < 3; i++) {
+        if (abs(target_angle[i] - as5600_angle[i]) > 45) {
+            for (int j = 0; j < 3; j++) {
+                target_speed[j] = 0;
+            }
+        }
+    }
+
     /* --- コントローラ --- */
     dt = (millis() - prev_time) / 1000.0; // [s]
     prev_time = millis();
@@ -235,6 +243,14 @@ void loop() {
     for (int i = 0; i < 3; i++) {
         target_rpm[0 + (i * 2)] = target_speed[i] - rotate_speed[i];
         target_rpm[1 + (i * 2)] = target_speed[i] + rotate_speed[i];
+    }
+
+    // target_rpmを1次遅れに通す
+    for (int i = 0; i < 3; i++) {
+        target_rpm[0 + (i * 2)] = K * (1 - std::exp(-dt / T)) * target_rpm[0 + (i * 2)] + prev_target_rpm[0 + (i * 2)] * std::exp(-dt / T);
+        target_rpm[1 + (i * 2)] = K * (1 - std::exp(-dt / T)) * target_rpm[1 + (i * 2)] + prev_target_rpm[1 + (i * 2)] * std::exp(-dt / T);
+        prev_target_rpm[0 + (i * 2)] = target_rpm[0 + (i * 2)];
+        prev_target_rpm[1 + (i * 2)] = target_rpm[1 + (i * 2)];
     }
 
     // PID制御(速度)
@@ -266,31 +282,6 @@ void make_current_data(int16_t current_data_in[8], int8_t current_data_out1[8], 
         current_data_out2[0 + (i * 2)] = (current_data_in[i + 4] >> 8) & 0xFF;
         current_data_out2[1 + (i * 2)] = current_data_in[i + 4] & 0xFF;
     }
-}
-
-void recv_cb(AsyncUDPPacket packet) {
-    recv_time = millis();
-    String str = String((char*)packet.data());
-    // スペース区切りで受信データを分割
-    for (int i = 0; i < 3; i++) { // 受信データの数だけ繰り返す
-        recv_data[i] = str.substring(0, str.indexOf(" ")).toFloat();
-        str = str.substring(str.indexOf(" ") + 1);
-    }
-    // 受信データをコピー
-    if (recv_data[0] == 0) {
-        data[0] = 0.01;
-    } else {
-        data[0] = recv_data[0];
-        data[1] = recv_data[1];
-    }
-    data[2] = recv_data[2];
-
-    // クライアントにデータを返信
-    String send_data = "";
-    for (int i = 0; i < 6; i++) {
-        send_data += String(m_rpm[i]) + " ";
-    }
-    packet.printf(send_data.c_str());
 }
 
 void recv_msg() {
@@ -344,7 +335,8 @@ void task2(void *args) {
         #else
         udp.beginPacket(server_ip, server_port);
         String send_data = "";
-        for (int i = 0; i < 6; i++) {
+        for (int i = 0; i < 1; i++) {
+            send_data += String(target_rpm[i]) + " ";
             send_data += String(m_rpm[i]) + " ";
         }
         udp.print(send_data);
