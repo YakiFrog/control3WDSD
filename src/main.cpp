@@ -37,7 +37,7 @@ uint16_t local_port = 12345;
 #ifdef HOME_WiFi
 const char* ssid = "Buffalo-G-2EC8";
 const char* password = "exkfnthn7x7k5";
-IPAddress server_ip(192, 168, 11, 60);
+IPAddress server_ip(192, 168, 11, 2);
 uint16_t server_port = 1113;
 uint16_t local_port = 12345;
 #endif
@@ -89,7 +89,7 @@ float Vx_list[3] = {0.0, 0.0, 0.0}; // [rpm]
 float Vy_list[3] = {0.0, 0.0, 0.0}; // [rpm]
 
 // 誤差<10%程度
-float Kp1 = 12;
+float Kp1 = 12; // 12
 float Ki1 = 0; // 0.1:BEST
 float Kd1 = 0;
 
@@ -108,10 +108,22 @@ float rotate_speed[3] = {0.0, 0.0, 0.0}; // [rpm]
 float target_rpm[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0}; // [rpm]
 float prev_target_rpm[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0}; // [rpm]
 
+// pose
+float x = 0.0;
+float y = 0.0;
+float qz = 0.0;
+float qw = 0.0;
+
+// twist
+float linear_x = 0.0;
+float linear_y = 0.0;
+float angular_z = 0.0;
+float world_angle = 0.0;
+
 // モータの計算モデルのパラメタ
 // ゲイン調整でうまくいかなかったら．これをいじる
-int K = 0.75; // ゲイン (実際の値が入力値に対してどれだけの割合で反応するか)
-int T = 0.1; // 時定数 (0より大きいほど遅れる)
+int K = 1.00; // ゲイン 0.75 (実際の値が入力値に対してどれだけの割合で反応するか)
+int T = 0.1; // 時定数  0.1 (0より大きいほど遅れる)
 
 int16_t calc_current_data[8] = {0, 0, 0, 0, 0, 0, 0, 0};  // ID: 1-8
 int8_t send_current_data1[8] = {0, 0, 0, 0, 0, 0, 0, 0}; // ID: 1-8
@@ -187,7 +199,7 @@ void loop() {
     V_dir = data[1] * (PI / 180); // [rad]
     V_yaw = (data[2] * 30) / (PI * wheel_radius); // [rpm]
 
-    // 車体速度
+    // 車体速度(twist)
     Vx = V * cos(V_dir - PI / 2); // [rpm]
     Vy = V * sin(V_dir - PI / 2); // [rpm]
 
@@ -200,17 +212,17 @@ void loop() {
     // 3つの車輪の速度と角度を計算
     for (int i = 0; i < 3; i++) {
         target_speed[i] = sqrt(pow(Vx_list[i], 2) + pow(Vy_list[i], 2)); // [rpm]
-        target_angle[i] = atan2(Vy_list[i], Vx_list[i]) * (180 / PI); // [degree]
+        target_angle[i] = atan2(Vy_list[i], Vx_list[i]) * (180 / PI); // [degree] (-180 to 180)
     }
 
     for (int i = 0; i < 3; i++) {
-        float error = target_angle[i] - as5600_angle[i];
-        // 0と360の境目をまたぐときに正負が逆になるので，ある程度のところで予め補正する
-        if (error < -270) {
-            target_angle[i] += 360;
-        } else if (error > 270) {
-            target_angle[i] -= 360;
-        }
+        float error = target_angle[i] - as5600_angle[i]; // [degree] (-360 to 360)
+        // 0と360の境目をまたぐときに正負が逆になるので，ある程度のところで予め補正する, ふらつくなら消す．
+        // if (error < -(270 + 45)) {
+        //     target_angle[i] += 360;
+        // } else if (error > 270 + 45) {
+        //     target_angle[i] -= 360;
+        // }
         // 目標角度に対して時計回りと反時計回りのどちらで回転するかを決定
         if (error < -90) {
             target_angle[i] += 180;
@@ -270,6 +282,22 @@ void loop() {
     can_wrapper.sendMessage(0x200, send_current_data1);
     can_wrapper.sendMessage(0x1FF, send_current_data2);
     /* ----------------- */
+
+    /* --- ROS2 --- */
+
+    // twist (linear, angular)
+    // rpm -> m/s
+    linear_x = Vx * (PI * wheel_radius / 30); // [m/s]
+    linear_y = Vy * (PI * wheel_radius / 30); // [m/s]
+    angular_z = V_yaw * (PI / 30); // [rad/s]
+    world_angle += angular_z * dt;
+
+    // angular_z分，x,y を回転, dtもつかう
+    x += (linear_x * cos(world_angle) - linear_y * sin(world_angle)) * dt;
+    y += (linear_x * sin(world_angle) + linear_y * cos(world_angle)) * dt;
+    qz = sin(world_angle / 2);
+    qw = cos(world_angle / 2);
+
     delay(10); // 1/5 時定数
 }
 
@@ -294,6 +322,7 @@ void recv_msg() {
         for (int i = 0; i < packet_size; i++) {
             str += (char)udp.read();
         }
+        
         // スペース区切りで受信データを分割
         for (int i = 0; i < 3; i++) { // 受信データの数だけ繰り返す
             recv_data[i] = str.substring(0, str.indexOf(" ")).toFloat();
@@ -322,25 +351,28 @@ void task1(void *args) {
 void task2(void *args) {
     while (1) {
         #ifdef DEBUG
-        Serial.println(">target_rpm[0]: " + String(target_rpm[0]));
-        Serial.println(">m_rpm[0]: " + String(m_rpm[0]));
-        Serial.println(">calc_current_data[0]: " + String(calc_current_data[0]));
-        Serial.println(">as5600_angle[0]: " + String(as5600_angle[0]));
+        // Serial.println(">target_rpm[0]: " + String(target_rpm[0]));
+        // Serial.println(">m_rpm[0]: " + String(m_rpm[0]));
+        // Serial.println(">calc_current_data[0]: " + String(calc_current_data[0]));
+        // Serial.println(">as5600_angle[0]: " + String(as5600_angle[0]));
 
-        Serial.println(">rotate_speed[0]: " + String(rotate_speed[0]));
-        Serial.println(">target_speed[0]: " + String(target_speed[0]));
-        Serial.println(">target_angle[0]: " + String(target_angle[0]));
+        // Serial.println(">rotate_speed[0]: " + String(rotate_speed[0]));
+        // Serial.println(">target_speed[0]: " + String(target_speed[0]));
+        // Serial.println(">target_angle[0]: " + String(target_angle[0]));
 
-        Serial.println(">recv_data[0]: " + String(recv_data[0]));
-        Serial.println(">recv_data[1]: " + String(recv_data[1]));
-        Serial.println(">recv_data[2]: " + String(recv_data[2]));
+        // Serial.println(">recv_data[0]: " + String(recv_data[0]));
+        // Serial.println(">recv_data[1]: " + String(recv_data[1]));
+        // Serial.println(">recv_data[2]: " + String(recv_data[2]));
         #else
         udp.beginPacket(server_ip, server_port);
         String send_data = "";
-        for (int i = 0; i < 1; i++) {
-            send_data += String(target_rpm[i]) + " ";
-            send_data += String(m_rpm[i]) + " ";
-        }
+        // for (int i = 0; i < 6; i++) {
+        //     // send_data += String(target_rpm[i]) + " ";
+        //     send_data += String(m_rpm[i]) + " ";
+        // }
+        send_data += String(x) + " " + String(y) + " ";
+        send_data += String(qz) + " " + String(qw) + " ";
+        send_data += String(linear_x) + " " + String(linear_y) + " " + String(angular_z);
         udp.print(send_data);
         udp.endPacket();
         #endif
